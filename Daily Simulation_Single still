@@ -1,0 +1,378 @@
+import math 
+import numpy as np 
+import matplotlib.pyplot as plt 
+from math import degrees, radians, sin, cos, tan, atan2, acos, log10, exp, pi 
+ 
+def Heat_transfer_rate_radiation(Ta, Tb,effems): 
+    ems1 = 0.8 
+    ems2 = 0.9 
+    T1 = Ta + 273.15 
+    T2 = Tb + 273.15 
+    eps_eff = 1 / ((1/ems1) + (1/ems2) - 1) 
+    sigma = 5.669e-8 
+    return effems * sigma * (T1**4 - T2**4) 
+ 
+def calculate_vapor_pressure(T_C): 
+    # Corrected Antoine equation for water (0-100°C) 
+    A = 8.07131 
+    B = 1730.63 
+    C = 233.426 
+    hgapp= 10**(A - B/(T_C + C))  # mmHg 
+    return 113.3*hgapp 
+ 
+def calculate_vapor_pressulre(T_C): 
+    A = 25.317 
+    B = 5144 
+    C = 273.15 
+    return exp(A - (B/(T_C + C)))  
+ 
+def Heat_Transfer_Rate_Convection(T1, T2): 
+    Tw = T1 + 273.15 
+    Tg = T2 + 273.15 
+    Pw = calculate_vapor_pressure(T1) 
+    Pg = calculate_vapor_pressure(T2) 
+     
+    term = (Tw - Tg) + ((Pw - Pg) * Tw / (268900 - Pw)) 
+    x = np.cbrt(term)  
+    hconv = 0.884 * x 
+    return hconv * (Tw - Tg) 
+ 
+def Heat_Transfer_Rate_Conduction(k, T1, T2, area, thickness): 
+    return (k * area * (T1 - T2)) / thickness 
+ 
+def Heat_to_surr(Tglass, V): 
+    h1g = 5.7 + 3.8 * V 
+    Tatm = Tamb  # Will be updated hourly 
+    return h1g * (Tglass - Tatm) 
+ 
+def Evaporative_heat_transfer(T1, T2): 
+    Tw = T1 + 273.15 
+    Tg = T2 + 273.15 
+    Pw = calculate_vapor_pressure(T1) 
+    Pg = calculate_vapor_pressure(T2) 
+     
+    # Shargi equation for latent heat (T1 in °C) 
+    if Tw==Tg: 
+        return 0,0 
+    else: 
+         
+        hfg=2493500*(1-(9.4779*T1/10000)+(1.3132*T1*T1/10000000)
+(4.7971*T1*T1*T1/1000000000)) 
+        delta_T = (Tw - Tg)  
+        term = (Tw - Tg) + ((Pw - Pg)*Tw/(268900 - Pw)) 
+        x = np.cbrt(term) if term > 0 else 0 
+        hconv = 0.884 * x 
+        hew = 0.016273 * hconv * (Pw - Pg) / delta_T 
+        Qevap = hew * (Tw - Tg) 
+        output = Qevap / hfg 
+        return Qevap, output 
+ 
+def heat_plate_to_water(Tpl, Tw, area=1, thickness=0.05): 
+    return Heat_Transfer_Rate_Conduction(15, Tpl, Tw, area, thickness) 
+ 
+def solar_position(lat, doy, local_time): 
+    """ 
+    Calculates solar zenith and azimuth angles using solar geometric 
+relationships. 
+     
+    Theory: 
+    - Declination (delta): Earth's axial tilt relative to celestial equator 
+[1] 
+    - Hour Angle (omega): Sun's position relative to solar noon (15°/hour) [2] 
+    - Zenith Angle (theta_z): Angle between vertical and sun's position [3] 
+    - Azimuth Angle (gamma_s): Compass direction of the sun (0°=North) [4] 
+     
+    References: 
+    [1] Cooper 1969 declination formula 
+    [2] ASHRAE Fundamentals 
+    [3] Spherical trigonometry cosine law 
+    [4] NOAA Solar Calculator methodology 
+    """ 
+    # Convert latitude to radians for calculations 
+    lat_rad = radians(lat) 
+     
+    # Solar declination (radians) 
+    delta = radians(23.45 * sin(2 * np.pi * (doy - 81)/365)) 
+     
+    # Hour angle (degrees) 
+    omega = 15 * (local_time - 12) 
+     
+    # Solar zenith angle (degrees) 
+    cos_theta_z = (sin(lat_rad) * sin(delta) +  
+                   cos(lat_rad) * cos(delta) * cos(radians(omega))) 
+    theta_z = degrees(np.arccos(cos_theta_z))  # arccos returns in radians 
+     
+    # Solar azimuth angle (degrees) 
+    numerator = sin(radians(omega)) 
+    denominator = (cos(radians(omega)) * sin(lat_rad) -  
+                   tan(delta) * cos(lat_rad)) 
+    gamma_s = degrees(atan2(numerator, denominator))  # Returns -180 to 180 
+     
+    # Convert azimuth to 0-360° convention 
+    gamma_s = gamma_s % 360 
+     
+    return theta_z, gamma_s 
+ 
+def radiation_components(theta_z, gamma_s, lat, doy, beta, azimuth_angle, 
+albedo, Kt): 
+    """ 
+    Calculates solar radiation components using: 
+    - ASHRAE clear sky model for extraterrestrial radiation 
+    - Erbs et al. (1982) model for diffuse fraction 
+    - Isotropic sky model for tilted surface radiation 
+     
+    Parameters: 
+    beta - Tilt angle of surface (degrees) 
+    azimuth_angle - Surface azimuth (degrees, 0=North) 
+    albedo - Ground reflectance (0-1) 
+    Kt - Clearness index (0-1) 
+    """ 
+    # Extraterrestrial radiation (W/m²) 
+    H0 = 1367 * (1 + 0.033 * cos(2 * np.pi * doy/365)) * cos(radians(theta_z)) 
+     
+    # Global Horizontal Irradiance (GHI) 
+    GHI = H0 * Kt if theta_z <= 90 else 0 
+ 
+    # Diffuse fraction (Erbs et al. 1982) 
+    if Kt <= 0.3: 
+        Kd = 1 - 1.13 * Kt       # Overcast sky 
+    elif Kt <= 0.7: 
+        Kd = 1.45 - 1.67 * Kt    # Partly cloudy 
+    else: 
+        Kd = 0.25                # Clear sky 
+     
+    DHI = Kd * GHI              # Diffuse Horizontal Irradiance 
+    DNI = (GHI - DHI)/max(cos(radians(theta_z)), 0.001)  # Direct Normal 
+Irradiance 
+ 
+    # Incidence angle for tilted surface (Duffie & Beckman 2013) 
+    cos_theta_t = (cos(radians(theta_z)) * cos(radians(beta)) + 
+                   sin(radians(theta_z)) * sin(radians(beta)) *  
+                   cos(radians(gamma_s - azimuth_angle))) 
+     
+    # Beam component on tilted surface 
+    I_beam = DNI * max(cos_theta_t, 0)  # Negative values = sun behind surface 
+     
+    # Diffuse component (isotropic sky assumption) 
+    I_diffuse = DHI * (1 + cos(radians(beta))) / 2 
+     
+    # Ground reflected component 
+    I_ground = albedo * GHI * (1 - cos(radians(beta))) / 2 
+     
+    # Total irradiance on tilted surface 
+    G_tilt = I_beam + I_diffuse + I_ground 
+     
+    return GHI, G_tilt 
+ 
+def solar_radiation_model(lat, doy, beta, surface_azimuth, albedo, Kt, 
+sunrise_hour, sunset_hour): 
+    """ 
+    Main function to model solar radiation components throughout daylight 
+hours 
+     
+    Inputs: 
+    lat - Latitude in degrees 
+    doy - Day of year (1-365) 
+    beta - Surface tilt angle (degrees) 
+    surface_azimuth - Surface orientation (degrees, 0=North) 
+    albedo - Ground reflectance (0-1) 
+    Kt - Clearness index (0-1) 
+    """ 
+    hours = range(sunrise_hour, sunset_hour + 1) 
+    GHI_hourly = [] 
+    G_tilt_hourly = [] 
+ 
+    for hr in hours: 
+        # Calculate solar position 
+        theta_z, gamma_s = solar_position(lat, doy, hr) 
+         
+        # Ignore times when sun is below horizon 
+        if theta_z > 90: 
+            GHI_hourly.append(0) 
+            G_tilt_hourly.append(0) 
+            continue 
+             
+        # Calculate radiation components 
+        GHI, G_tilt = radiation_components(theta_z, gamma_s, lat, doy, beta, 
+                                         surface_azimuth, albedo, Kt) 
+        GHI_hourly.append(GHI) 
+        G_tilt_hourly.append(G_tilt) 
+ 
+    # Plotting results 
+    plt.figure(figsize=(10, 6)) 
+    plt.plot(hours, GHI_hourly, 'b-o', label='Global Horizontal Irradiance 
+(GHI)') 
+    plt.plot(hours, G_tilt_hourly, 'r-s', label='Tilted Surface Irradiance') 
+     
+    plt.xlabel('Local Time (hours)', fontsize=12) 
+    plt.ylabel('Solar Irradiance (W/m²)', fontsize=12) 
+    plt.title(f'Solar Radiation Components at {lat}°N (Day {doy})', 
+fontsize=14) 
+     
+    plt.legend() 
+    plt.grid(alpha=0.3) 
+    plt.xticks(hours) 
+    plt.tight_layout() 
+     
+    return np.array(G_tilt_hourly) 
+ 
+def heat_transfer_loss(Telem, Tamb, thickness_across,k,Area): 
+    q_perm2=k*(Telem-Tamb)/thickness_across 
+    ans=q_perm2*Area 
+    return ans 
+ 
+def heat_mout(Twater,m_rate): 
+    T1=Twater 
+    valup=83915 
+    vallow=293070 
+    tlow=20 
+    tup=70 
+    hf=((T1-tlow)/(tup-tlow)*(valup-vallow))+vallow  
+    #using databook to get the hfg values for the required temperature range 
+    return m_rate*hf 
+ 
+def calculate_m_wg( c, T_w, T_gi): 
+    """ 
+    Calculates evaporation rate from water surface to glass cover in solar 
+stills 
+     
+    Parameters: 
+    am (float): Mass accommodation factor (dimensionless, typically 1e-7 to 
+1e-6) 
+    c (float): Saline concentration (%) 
+    T_w (float): Water temperature in °C 
+    T_gi (float): Glass inner temperature in °C 
+     
+    Returns: 
+    float: Evaporation rate (kg/m²·s) 
+    """ 
+ 
+    am=0.3*10**-6 
+    # Correction factor for solute concentration 
+    f_c = 1 - 0.0054 * c 
+     
+    # Calculate vapor pressures using Antoine equation 
+ 
+    P_Tw = calculate_vapor_pressure(T_w) 
+    P_Tgi = calculate_vapor_pressure(T_gi) 
+     
+    # Convert temperatures to Kelvin 
+    T_wK = T_w + 273.15 
+    T_giK = T_gi + 273.15 
+     
+    # Calculate evaporation rate components 
+    term1 = P_Tw / math.sqrt(T_wK) 
+    term2 = P_Tgi / math.sqrt(T_giK) 
+     
+    return am * f_c * (term1 - term2) 
+ 
+# Main Simulation Parameters 
+sunrise = 8 
+sunset = 18 
+num_hours = sunset-sunrise 
+Tamb = 23  # Initial value, will be updated hourly 
+timestep = 1  # 1 second timestep 
+iterations_per_hour = 3600 
+Tsky= (0.0552 * (Tamb+273.15)**1.5)-273 
+possiblebeta=[0,10,20,30,40,50,60,70,80] 
+ 
+Aw=0.5    # Areas 
+beta =30        # Slope angle 
+Ag=Aw/cos(beta) 
+Cg = 1925000*Ag * 0.004  # Glass 
+Cw = 4174000 *Aw* 0.03   # Water (corrected depth) 
+Cpl = 2421900 *Aw* 0.005  # Plate 
+# Initialize arrays 
+Tfg = np.zeros(num_hours) 
+Twf = np.zeros(num_hours) 
+Tfpl = np.zeros(num_hours) 
+otf = np.zeros(num_hours) 
+ 
+# Run solar radiation model with LOCALISED parameters 
+G_tilt_hourly = solar_radiation_model(25, 110, beta, 0, 0.045, 0.65, sunrise, 
+sunset) 
+ 
+# Initial conditions : setting initial conditions to the ambient temperature 
+Tw_prev = Tamb 
+Tg_prev = Tamb  
+Tpl_prev = Tamb 
+ 
+ 
+G_tilt_hourly=[320, 375, 600, 870, 920, 975, 900, 720, 510, 400, 200] 
+num_hours=len(G_tilt_hourly) 
+for hr in range(num_hours-1): 
+    I = G_tilt_hourly[hr] 
+    hourly_output = 0 
+     
+    # Realistic wind speed profile (diurnal variation) 
+    V = 2 + 3 * np.sin(np.pi * (hr - 6) / 12) 
+     
+ 
+    # Update ambient temperature (example diurnal profile) 
+    #Tatm = 27 + 10 * np.sin(np.pi * (hr - 6) / 12) 
+    Tatm=23 
+    Tw_current = Tw_prev 
+    Tg_current = Tg_prev 
+    Tpl_current = Tpl_prev 
+     
+    for _ in range(iterations_per_hour): 
+        # Heat transfer calculations according to the modelling 
+        qcin = Heat_Transfer_Rate_Convection(Tw_current, Tg_current) 
+        qein, o = Evaporative_heat_transfer(Tw_current, Tg_current) 
+        qrin = Heat_transfer_rate_radiation(Tw_current, Tg_current,0.88) 
+        qpl = heat_plate_to_water(Tpl_current, Tw_current) 
+        qrad_base_water=Heat_transfer_rate_radiation(Tpl_current,Tw_current,0.
+8) 
+        # Heat losses with variable wind speed 
+        heat_g_s = Heat_to_surr(Tg_current, V)       
+        hradout = Heat_transfer_rate_radiation(Tg_current, Tsky,0.7) 
+        qloss_sides=heat_transfer_loss(Tw_prev,Tamb,.05,.1,.025) 
+        massloss=heat_mout(Tw_current,calculate_m_wg(3.5,Tw_current,Tg_current
+)) 
+        qlossend=heat_transfer_loss(Tpl_current,Tamb,0.1,0.1,Aw) 
+        # Temperature updates - from the heat transfer equations 
+        Tg_current += ((I*0.2 + qcin + qein - heat_g_s - hradout) * 
+timestep)*Ag / Cg 
+        Tw_current += ((I*0.8*0.7 - qcin - qein - qrin+qpl+qrad_base_water
+qrad_base_water-massloss) * timestep)*Aw / Cw 
+        Tpl_current += ((I*0.3*0.8*0.6 - qpl-qrad_base_water-qlossend) * 
+timestep)*Aw / Cpl 
+         
+        #hourly_output += o * timestep #adding up over the time step 
+        hourly_output +=calculate_m_wg(3.5,Tw_current,Tg_current)*timestep 
+ 
+    # Store hourly results 
+    Tfg[hr] = Tg_current 
+    Twf[hr] = Tw_current 
+    Tfpl[hr] = Tpl_current 
+    otf[hr] = hourly_output 
+     
+    # Update previous values 
+    Tw_prev, Tg_prev, Tpl_prev = Tw_current, Tg_current, Tpl_current 
+ 
+    print(f"Hourly output (hr={hr+1}): {otf[hr]:.2f} liters/m²") 
+ 
+# Final results (removed erroneous 3600 multiplier) 
+print(f"Final daily output: {otf.sum():.2f} liters/m²") 
+ 
+# Plotting 
+hours = range(1, num_hours ) 
+plt.figure() 
+plt.plot(hours, Twf, 'g', label='Water Temp') 
+plt.plot(hours, Tfg, 'k', label='Glass Temp') 
+plt.xlabel('Time (hour)') 
+plt.ylabel('Temperature (°C)') 
+plt.legend() 
+plt.title('Temperature Variation in Solar Still') 
+plt.grid() 
+plt.show() 
+ 
+plt.figure() 
+plt.plot(hours, otf, 'b') 
+plt.xlabel('Time (hour)') 
+plt.ylabel('Output (liters/m²)') 
+plt.title('Hourly Water Output') 
+plt.grid() 
+plt.show() 
+
+make a read me file for this to put in github
